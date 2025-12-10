@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  jira-autoassign:
+    build: .
+    container_name: jira-autoassign
+    ports:
+      - "8000:8000"
+    environment:
+      - JIRA_BASE_URL=${JIRA_BASE_URL}
+      - JIRA_EMAIL=${JIRA_EMAIL}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN}
+      - TECHNICAL_OWNER_TEAM=${TECHNICAL_OWNER_TEAM}
+      - ASSIGNMENT_THRESHOLD=${ASSIGNMENT_THRESHOLD:-0.5}
+      - SIMILARITY_WEIGHT=${SIMILARITY_WEIGHT:-0.6}
+      - RECENCY_WEIGHT=${RECENCY_WEIGHT:-0.2}
+      - WORKLOAD_WEIGHT=${WORKLOAD_WEIGHT:-0.2}
+      - DATABASE_URL=sqlite:////app/data/jira_assignments.db
+    volumes:
+      - ./dev_profiles.csv:/app/dev_profiles.csv
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Add nginx reverse proxy
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: jira-autoassign-nginx
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf
+  #     - ./ssl:/etc/nginx/ssl
+  #   depends_on:
+  #     - jira-autoassign
+  #   restart: unless-stopped
+
+volumes:
+  data:
+    driver: local
