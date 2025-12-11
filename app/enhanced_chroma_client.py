@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import chromadb
-from chromadb.config import Settings
 import httpx
 from openai import OpenAI
 
@@ -26,16 +25,30 @@ from app.jira_client import JiraClient
 class EnhancedTicketEmbeddingClient:
     """Enhanced ChromaDB client with fine-tuning capabilities."""
     
+    # Team name mapping: database format -> JIRA format
+    TEAM_NAME_MAPPING = {
+        "team-nandi": "Team Nandi",
+        "team-himalaya": "Team Himalaya",
+        "team-kilimanjaro": "Team Kilimanjaro",
+        "team-fuji": "Team Fuji",
+        "team-rushmore": "Team Rushmore",
+        "team-k2": "Team K2",
+        "team-everest": "Team Everest",
+        "team-matterhorn": "Team Matterhorn",
+        "team-supernova": "Team Supernova",
+        "team-denali": "Team Denali",
+        "team-elbrus": "Team Elbrus",
+    }
+    
     def __init__(self, host: str = "localhost", port: int = 8000):
         """Initialize the enhanced client."""
         self.host = host
         self.port = port
         
-        # Initialize ChromaDB client
+        # Initialize ChromaDB client (v1.x API)
         self.chroma_client = chromadb.HttpClient(
             host=host,
-            port=port,
-            settings=Settings(allow_reset=True)
+            port=port
         )
         
         # Initialize other clients
@@ -81,6 +94,24 @@ class EnhancedTicketEmbeddingClient:
                 metadata={"description": "Jira ticket embeddings for team assignment"}
             )
             print(f"✅ Created new tickets collection: {self.tickets_collection_name}")
+    
+    def _normalize_team_name(self, team_name: str) -> str:
+        """
+        Convert team name from database format to JIRA format.
+        E.g., 'team-nandi' -> 'Team Nandi'
+        """
+        # Try exact match first
+        if team_name in self.TEAM_NAME_MAPPING:
+            return self.TEAM_NAME_MAPPING[team_name]
+        
+        # Try case-insensitive match
+        team_lower = team_name.lower()
+        for db_name, jira_name in self.TEAM_NAME_MAPPING.items():
+            if db_name.lower() == team_lower:
+                return jira_name
+        
+        # Fallback: title case with spaces instead of hyphens
+        return team_name.replace('-', ' ').replace('_', ' ').title()
     
     def _load_team_expertise_weights(self) -> Dict[str, Dict[str, float]]:
         """Load team expertise weights for fine-tuning."""
@@ -387,6 +418,341 @@ class EnhancedTicketEmbeddingClient:
         except Exception as e:
             print(f"Error in enhanced team assignment: {e}")
             return {"error": f"Assignment failed: {str(e)}"}
+    
+    def send_email_notification(self, ticket_key: str, result: Dict[str, Any], error: str = None):
+        """
+        Send email notification with prediction results.
+        
+        Args:
+            ticket_key: JIRA ticket key
+            result: Prediction result dictionary
+            error: Error message if assignment failed
+        """
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        
+        # Get email configuration from environment
+        smtp_server = os.getenv('SMTP_SERVER')
+        smtp_port = int(os.getenv('SMTP_PORT', 25))
+        smtp_user = os.getenv('SMTP_USER')
+        smtp_password = os.getenv('SMTP_PASSWORD', '')
+        notification_email = os.getenv('NOTIFICATION_EMAIL', 'tc12411@netapp.com')
+        
+        if not smtp_server or not smtp_user:
+            print("⚠️  SMTP not configured (missing SMTP_SERVER or SMTP_USER), skipping email notification")
+            return
+        
+        try:
+            # Create message
+            msg = MIMEMultipart('alternative')
+            
+            if error:
+                # Failure email
+                msg['Subject'] = f"❌ JIRA Ticket Assignment Failed: {ticket_key}"
+                html_body = f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+                    <h2 style="color: #d32f2f;">❌ Ticket Assignment Failed</h2>
+                    <p><strong>Ticket:</strong> <a href="https://jira.netapp.com/browse/{ticket_key}">{ticket_key}</a></p>
+                    <p><strong>Error:</strong> {error}</p>
+                    <p>Please manually review and assign this ticket.</p>
+                </body>
+                </html>
+                """
+            else:
+                # Success email
+                predicted_team = result.get('recommended_team', result.get('predicted_team', 'Unknown'))
+                confidence = result.get('base_score', result.get('confidence', 0)) * 100
+                llm_reasoning = result.get('llm_reasoning', 'N/A')
+                similar_tickets = result.get('similar_tickets', [])
+                
+                msg['Subject'] = f"✅ JIRA Ticket Auto-Assigned: {ticket_key}"
+                
+                # Build similar tickets HTML
+                similar_html = ""
+                for i, ticket in enumerate(similar_tickets[:5], 1):
+                    similar_html += f"""
+                    <div style="margin: 5px 0; padding: 10px; background: #f5f5f5; border-radius: 5px;">
+                        <strong>{i}. {ticket['ticket_id']}</strong> → {ticket['team']} (distance: {ticket['distance']:.4f})<br/>
+                        <span style="color: #666; font-size: 13px;">{ticket['summary'][:80]}...</span>
+                    </div>
+                    """
+                
+                html_body = f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+                    <h2 style="color: #4CAF50;">✅ Ticket Successfully Assigned</h2>
+                    <p><strong>Ticket:</strong> <a href="https://jira.netapp.com/browse/{ticket_key}">{ticket_key}</a></p>
+                    <p><strong>Assigned Team:</strong> {predicted_team}</p>
+                    <p><strong>Confidence:</strong> {confidence:.1f}%</p>
+                    
+                    <h3>🤖 LLM Analysis:</h3>
+                    <p style="background: #e3f2fd; padding: 10px; border-radius: 5px; border-left: 4px solid #2196F3;">
+                        {llm_reasoning}
+                    </p>
+                    
+                    <h3>🔍 Top Similar Tickets (from ChromaDB):</h3>
+                    {similar_html}
+                    
+                    <p style="margin-top: 20px; color: #666; font-size: 12px;">
+                        System: NetApp JIRA Auto-Assignment (LLM-Enhanced)
+                    </p>
+                </body>
+                </html>
+                """
+            
+            msg['From'] = smtp_user
+            msg['To'] = notification_email
+            msg.attach(MIMEText(html_body, 'html'))
+            
+            # Send email
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                # Only use STARTTLS and authentication for ports 587/465
+                if smtp_port in [587, 465]:
+                    server.starttls()
+                    if smtp_password:
+                        server.login(smtp_user, smtp_password)
+                # For port 25 (internal relay), no authentication needed
+                server.send_message(msg)
+            
+            print(f"✅ Email notification sent to {notification_email}")
+            
+        except Exception as e:
+            print(f"⚠️  Failed to send email notification: {e}")
+    
+    async def _predict_team_with_llm(
+        self,
+        new_ticket: Dict[str, str],
+        similar_tickets: List[Dict[str, Any]]
+    ) -> Tuple[str, float, str]:
+        """
+        Use LLM to predict the best team based on new ticket and similar historical tickets.
+        
+        Args:
+            new_ticket: Dict with 'key', 'summary', 'description' of new ticket
+            similar_tickets: List of similar tickets from ChromaDB with team assignments
+            
+        Returns:
+            Tuple of (predicted_team, confidence, reasoning)
+        """
+        # Build prompt for LLM
+        similar_tickets_text = "\n".join([
+            f"{i+1}. [{ticket['ticket_id']}] Team: {ticket['team']} | Distance: {ticket['distance']:.4f}\n"
+            f"   Summary: {ticket['summary']}"
+            for i, ticket in enumerate(similar_tickets[:10])
+        ])
+        
+        prompt = f"""You are an expert JIRA ticket triaging system for NetApp. Your task is to assign a new JIRA ticket to the most appropriate team based on similar historical tickets.
+
+NEW TICKET TO ASSIGN:
+Ticket: {new_ticket['key']}
+Summary: {new_ticket['summary']}
+Description: {new_ticket['description'][:500]}...
+
+TOP 10 MOST SIMILAR HISTORICAL TICKETS (from ChromaDB vector search):
+{similar_tickets_text}
+
+INSTRUCTIONS:
+1. Analyze the new ticket's technical content (protocols, components, error messages, keywords)
+2. Compare it with the similar historical tickets
+3. Consider the team assignments of the most similar tickets (lower distance = more similar)
+4. Determine which team is the best match
+
+RESPOND IN THIS EXACT FORMAT:
+TEAM: <team-name>
+CONFIDENCE: <0.0-1.0>
+REASONING: <brief explanation of why this team is the best match>
+
+Example response:
+TEAM: team-supernova
+CONFIDENCE: 0.85
+REASONING: The ticket involves FabricPool and cool tier issues, which are handled by team-supernova. The top 3 most similar tickets (distance < 0.2) were all assigned to team-supernova and deal with similar cold data tiering problems.
+"""
+        
+        try:
+            # Call LLM (NetApp proxy requires 'user' field with email format)
+            user = os.getenv('JIRA_EMAIL', '').split('@')[0] if os.getenv('JIRA_EMAIL') else 'webhook_client'
+            
+            response = self.llm_client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": "You are an expert JIRA ticket assignment system."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=300,
+                user=user  # Required by NetApp LLM proxy
+            )
+            
+            llm_response = response.choices[0].message.content.strip()
+            
+            # Parse LLM response
+            lines = llm_response.split('\n')
+            team = None
+            confidence = 0.5
+            reasoning = ""
+            
+            for line in lines:
+                if line.startswith('TEAM:'):
+                    team = line.replace('TEAM:', '').strip()
+                elif line.startswith('CONFIDENCE:'):
+                    confidence = float(line.replace('CONFIDENCE:', '').strip())
+                elif line.startswith('REASONING:'):
+                    reasoning = line.replace('REASONING:', '').strip()
+            
+            # Fallback: if LLM didn't follow format, use vote counting
+            if not team:
+                print("⚠️  LLM response didn't follow format, falling back to vote counting")
+                team_votes = {}
+                for ticket in similar_tickets:
+                    team = ticket['team']
+                    team_votes[team] = team_votes.get(team, 0) + 1
+                team = max(team_votes.items(), key=lambda x: x[1])[0]
+                confidence = team_votes[team] / len(similar_tickets)
+                reasoning = f"Vote counting fallback: {team_votes[team]}/{len(similar_tickets)} similar tickets assigned to {team}"
+            
+            return team, confidence, reasoning
+            
+        except Exception as e:
+            print(f"⚠️  LLM prediction failed: {e}, falling back to vote counting")
+            # Fallback to simple vote counting
+            team_votes = {}
+            for ticket in similar_tickets:
+                team = ticket['team']
+                team_votes[team] = team_votes.get(team, 0) + 1
+            team = max(team_votes.items(), key=lambda x: x[1])[0]
+            confidence = team_votes[team] / len(similar_tickets)
+            reasoning = f"LLM failed, used vote counting: {team_votes[team]}/{len(similar_tickets)} votes"
+            return team, confidence, reasoning
+    
+    async def process_webhook_ticket(self, ticket_key: str, assign_in_jira: bool = True) -> Dict[str, Any]:
+        """
+        Process a ticket from webhook: filter, predict, assign, notify.
+        
+        Args:
+            ticket_key: JIRA ticket key
+            assign_in_jira: Whether to update JIRA Technical Owner field
+            
+        Returns:
+            Dictionary with processing results
+        """
+        try:
+            # Fetch ticket from JIRA
+            print(f"🎫 Processing webhook for {ticket_key}")
+            ticket = self.jira_client.fetch_ticket(ticket_key)
+            
+            if not ticket:
+                return {"status": "error", "message": "Failed to fetch ticket from JIRA"}
+            
+            # Check filters: NFSAAS project + Bug type + Azure + No Technical Owner
+            project_key = ticket.get('project', {}).get('key', '')
+            issue_type = ticket.get('issuetype', {}).get('name', '')
+            technical_owner = ticket.get('customfield_10050')  # Technical Owner field
+            
+            # Get Hyperscaler field (customfield_16202) - Azure (array format)
+            hyperscaler_field = ticket.get('customfield_16202')
+            if hyperscaler_field:
+                # Field is an array: [{"value": "Azure", "id": "16809"}]
+                if isinstance(hyperscaler_field, list) and len(hyperscaler_field) > 0:
+                    hyperscaler_value = hyperscaler_field[0].get('value', '')
+                elif isinstance(hyperscaler_field, dict):
+                    hyperscaler_value = hyperscaler_field.get('value', '')
+                else:
+                    hyperscaler_value = str(hyperscaler_field)
+            else:
+                hyperscaler_value = ''
+            
+            # Filter 1: NFSAAS project
+            if project_key != 'NFSAAS':
+                print(f"⏭️  Skipping: Not NFSAAS project (found: {project_key})")
+                return {"status": "skipped", "reason": "Not NFSAAS project"}
+            
+            # Filter 2: Bug type
+            if issue_type != 'Bug':
+                print(f"⏭️  Skipping: Not Bug type (found: {issue_type})")
+                return {"status": "skipped", "reason": "Not Bug type"}
+            
+            # Filter 3: Hyperscaler must be Azure
+            if hyperscaler_value.upper() != 'AZURE':
+                print(f"⏭️  Skipping: Not Azure hyperscaler (found: {hyperscaler_value})")
+                return {"status": "skipped", "reason": f"Not Azure (found: {hyperscaler_value})"}
+            
+            # Filter 4: No existing Technical Owner
+            if technical_owner:
+                print(f"⏭️  Skipping: Already has Technical Owner: {technical_owner}")
+                return {"status": "skipped", "reason": "Already assigned"}
+            
+            print(f"✅ Ticket passes filters: NFSAAS + Bug + Azure + No owner")
+            
+            # Generate embedding and query ChromaDB for similar tickets
+            full_content = f"{ticket.get('summary', '')} {ticket.get('description', '')}"
+            embedding = await self.generate_embedding(full_content)
+            
+            results = self.tickets_collection.query(
+                query_embeddings=[embedding],
+                n_results=20
+            )
+            
+            # Prepare context for LLM with top similar tickets
+            print(f"🔍 Found {len(results['ids'][0])} similar tickets, sending to LLM for analysis...")
+            
+            similar_tickets_context = []
+            for i in range(len(results['ids'][0])):
+                similar_tickets_context.append({
+                    "ticket_id": results['ids'][0][i],
+                    "team": results['metadatas'][0][i].get('team', 'unknown'),
+                    "summary": results['metadatas'][0][i].get('summary', 'N/A'),
+                    "distance": results['distances'][0][i]
+                })
+            
+            # Send to LLM for team prediction
+            predicted_team, confidence, llm_reasoning = await self._predict_team_with_llm(
+                new_ticket={
+                    "key": ticket_key,
+                    "summary": ticket.get('summary', ''),
+                    "description": ticket.get('description', '')
+                },
+                similar_tickets=similar_tickets_context
+            )
+            
+            print(f"🎯 LLM Predicted: {predicted_team} ({confidence:.1%} confidence)")
+            print(f"💭 LLM Reasoning: {llm_reasoning}")
+            
+            # Normalize team name for JIRA (convert team-nandi -> Team Nandi)
+            jira_team_name = self._normalize_team_name(predicted_team)
+            print(f"📝 Normalized team name: {predicted_team} -> {jira_team_name}")
+            
+            # Assign in JIRA if requested
+            if assign_in_jira:
+                result_update = await self.jira_client.update_technical_owner(ticket_key, jira_team_name)
+                success = result_update.get('success', False)
+                if not success:
+                    error_msg = "Failed to update JIRA Technical Owner field"
+                    self.send_email_notification(ticket_key, None, error=error_msg)
+                    return {"status": "error", "message": error_msg}
+                print(f"✅ Updated Technical Owner in JIRA: {jira_team_name}")
+            
+            # Prepare result
+            result = {
+                "status": "success",
+                "ticket": ticket_key,
+                "predicted_team": predicted_team,
+                "confidence": confidence,
+                "llm_reasoning": llm_reasoning,
+                "similar_tickets": similar_tickets_context[:5]  # Top 5 for email
+            }
+            
+            # Send success email notification
+            self.send_email_notification(ticket_key, result)
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Webhook processing failed: {str(e)}"
+            print(f"❌ {error_msg}")
+            self.send_email_notification(ticket_key, None, error=error_msg)
+            return {"status": "error", "message": error_msg}
 
 
 async def test_fine_tuning():

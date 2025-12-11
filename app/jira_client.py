@@ -143,6 +143,55 @@ class JiraClient:
                 "status_code": 0,
                 "message": str(e)
             }
+    
+    def fetch_ticket(self, issue_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch ticket details from JIRA (synchronous).
+        
+        Args:
+            issue_key: JIRA issue key (e.g., NFSAAS-12345)
+            
+        Returns:
+            Dict with ticket fields or None if error
+        """
+        # Request specific fields including custom fields
+        fields = "summary,description,project,issuetype,customfield_10050,customfield_16202"
+        url = f"{self.base_url}/rest/api/{self.api_version}/issue/{issue_key}?fields={fields}"
+        
+        try:
+            import httpx
+            with httpx.Client(timeout=30.0) as client:
+                response = client.get(url, headers=self.headers)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # DEBUG: Print full JSON response
+                    print(f"\n{'='*80}")
+                    print(f"🔍 FULL JIRA JSON RESPONSE for {issue_key}")
+                    print(f"{'='*80}")
+                    import json
+                    print(json.dumps(data, indent=2, default=str))
+                    print(f"{'='*80}\n")
+                    
+                    fields = data.get('fields', {})
+                    
+                    # Extract relevant fields
+                    return {
+                        'key': issue_key,
+                        'summary': fields.get('summary', ''),
+                        'description': fields.get('description', ''),
+                        'project': fields.get('project', {}),
+                        'issuetype': fields.get('issuetype', {}),
+                        'customfield_10050': fields.get('customfield_10050'),  # Technical Owner
+                        'customfield_16202': fields.get('customfield_16202'),  # Hyperscaler (Azure)
+                    }
+                else:
+                    logger.error(f"Failed to fetch {issue_key}: {response.status_code}")
+                    return None
+        except Exception as e:
+            logger.error(f"Error fetching {issue_key}: {str(e)}")
+            return None
 
     async def get_technical_owner(
         self,
@@ -446,6 +495,26 @@ class JiraClient:
         except Exception as e:
             logger.error(f"Error fetching user {account_id}: {str(e)}")
             return None
+    
+    def assign_technical_owner(self, issue_key: str, team_name: str) -> bool:
+        """
+        Synchronous wrapper to update Technical Owner field.
+        Used by webhook handler.
+        
+        Args:
+            issue_key: JIRA issue key
+            team_name: Team name to assign
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        import asyncio
+        try:
+            result = asyncio.run(self.update_technical_owner(issue_key, team_name))
+            return result.get('success', False)
+        except Exception as e:
+            logger.error(f"Error in assign_technical_owner: {e}")
+            return False
 
 
 # Global Jira client instance

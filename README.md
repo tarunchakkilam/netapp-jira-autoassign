@@ -1,228 +1,153 @@
-# JIRA Team Auto-Assignment System# Jira Auto-Assignment Service
+# JIRA Team Auto-Assignment System
 
+An intelligent team assignment system using embeddings and vector similarity to automatically route JIRA tickets to the appropriate team based on historical patterns.
 
+## 🎯 Overview
 
-An intelligent team assignment system using embeddings and vector similarity to automatically route JIRA tickets to the appropriate team based on historical patterns.Automated Jira ticket assignment service that intelligently assigns tickets to developers based on their past history, skill similarity, and current workload.
+This system uses OpenAI embeddings and ChromaDB to learn from historical JIRA ticket assignments and predict the best team for new tickets. It achieves 60-75% confidence on clear matches by finding similar historical tickets and using majority voting.
 
+**Key Features:**
+- 🤖 Automated webhook-based ticket assignment for NFSAAS Bug tickets (ANF cloud provider only)
+- 🧠 LLM-enhanced predictions using GPT-4 for intelligent team matching
+- 📧 Email notifications with detailed prediction analysis and LLM reasoning
+- 🎯 Embedding-based similarity matching using ChromaDB
+- 📊 5,273 tickets from 11 teams (90-day training window)
+- 🔍 Smart filtering: NFSAAS + Bug + ANF (Azure NetApp Files) + No owner
 
+## 🏗️ Architecture
 
-## 🎯 Overview## 🎯 Features
+- **Embedding Model**: OpenAI text-embedding-ada-002 (1536 dimensions)
+- **Vector Database**: ChromaDB for similarity search
+- **Training Data**: 5,273 tickets from 11 teams (90-day window)
+- **Prediction Method**: K-nearest neighbors (k=20) with majority voting
+- **Webhook Server**: Flask-based webhook receiver
+- **Email System**: SMTP-based HTML notifications
 
+## 📋 Prerequisites
 
-
-This system uses OpenAI embeddings and ChromaDB to learn from historical JIRA ticket assignments and predict the best team for new tickets. It achieves 60-75% confidence on clear matches by finding similar historical tickets and using majority voting.- **Intelligent Assignment**: Uses TF-IDF similarity matching to find the best developer based on ticket content
-
-- **Automatic Profile Building**: 🆕 Fetches developer history from Jira automatically - no manual CSV editing!
-
-## 🏗️ Architecture- **Workload Balancing**: Considers current open tickets vs developer capacity
-
-- **Recency Factor**: Distributes work fairly by considering recent assignment history
-
-- **Embedding Model**: OpenAI text-embedding-ada-002 (1536 dimensions)- **Configurable Scoring**: Weighted scoring algorithm (similarity + recency + workload)
-
-- **Vector Database**: ChromaDB for similarity search- **Automatic Triage**: Tags tickets for manual review when confidence is low
-
-- **Training Data**: 5,273 tickets from 11 teams (90-day window)- **Auto-Discovery**: 🆕 Automatically finds and adds team members from Jira
-
-- **Prediction Method**: K-nearest neighbors (k=20) with majority voting- **RESTful Webhook**: FastAPI endpoint for Jira webhook integration
-
-- **SQLite Database**: Tracks developer profiles and assignment history
-
-## 📋 Prerequisites- **Comprehensive Logging**: Full audit trail of all assignment decisions
-
-
-
-- Python 3.9+## 📊 Scoring Algorithm
-
+- Python 3.9+
 - ChromaDB server running on localhost:8000
-
-- JIRA API access with Bearer token authenticationThe service calculates a final score for each developer using:
-
+- JIRA API access with Bearer token authentication
 - Access to NetApp LLM proxy for OpenAI embeddings
+- SMTP server for email notifications
 
-```
-
-## 🚀 Quick Startfinal_score = 0.6 × similarity + 0.2 × recency + 0.2 × (1 - load_factor)
-
-```
+## 🚀 Quick Start
 
 ### 1. Installation
 
-- **Similarity Score (60%)**: TF-IDF cosine similarity between ticket and developer's history
+```bash
+# Clone the repository
+git clone https://github.com/tarunchakkilam/netapp-jira-autoassign.git
+cd netapp-jira-autoassign
 
-```bash- **Recency Score (20%)**: Time since last assignment (favors less recently assigned developers)
-
-# Clone the repository- **Workload Score (20%)**: Available capacity (favors developers with lighter load)
-
-git clone <repository-url>
-
-cd jira-autoassignIf the best score is below the threshold (default 0.5), the ticket is tagged as `triage_needed` instead of auto-assigned.
-
-
-
-# Create virtual environment## 🏗️ Project Structure
-
+# Create virtual environment
 python3 -m venv venv
+source venv/bin/activate
 
-source venv/bin/activate```
-
-jira-autoassign/
-
-# Install dependencies├── app/
-
-pip install -r requirements.txt│   ├── __init__.py          # Package initialization
-
-```│   ├── main.py              # FastAPI application and webhook endpoint
-
-│   ├── assigner.py          # Assignment logic and scoring algorithm
-
-### 2. Configuration│   ├── preprocessor.py      # TF-IDF text processing and similarity
-
-│   ├── jira_client.py       # Jira REST API client
-
-Create a `.env` file with your credentials:│   ├── db.py                # Database utilities and session management
-
-│   └── models.py            # SQLAlchemy ORM models
-
-```bash├── requirements.txt         # Python dependencies
-
-# JIRA Configuration├── .env.example            # Environment variables template
-
-JIRA_BASE_URL=https://your-jira-instance.atlassian.net├── .gitignore              # Git ignore patterns
-
-JIRA_API_TOKEN=your_jira_api_token├── dev_profiles.csv        # Developer profiles (dummy data)
-
-JIRA_EMAIL=your.email@company.com└── README.md               # This file
-
+# Install dependencies
+pip install -r requirements.txt
 ```
 
+### 2. Configuration
+
+Create a `.env` file with your credentials:
+
+```bash
+# JIRA Configuration
+JIRA_URL=https://your-jira-instance.atlassian.net
+JIRA_TOKEN=your_jira_bearer_token
+
 # OpenAI Configuration (via NetApp LLM Proxy)
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_API_BASE=https://llm-proxy-api.ai.openeng.netapp.com/v1
 
-OPENAI_API_KEY=your_openai_api_key## 🚀 Quick Start
+# ChromaDB Configuration
+CHROMA_HOST=localhost
+CHROMA_PORT=8000
 
-OPENAI_BASE_URL=https://llm-proxy-api.ai.openeng.netapp.com
+# Email/SMTP Configuration
+SMTP_SERVER=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=your_email@example.com
+SMTP_PASSWORD=your_smtp_password
+NOTIFICATION_EMAIL=tc12411@netapp.com
 
-```### 1. Prerequisites
+# Webhook Server Configuration
+WEBHOOK_PORT=5000
+WEBHOOK_HOST=0.0.0.0
+```
 
+### 3. Start ChromaDB
 
-
-### 3. Start ChromaDB- Python 3.9+
-
-- Jira Cloud instance with admin access
-
-```bash- Jira API token ([generate here](https://id.atlassian.com/manage-profile/security/api-tokens))
-
+```bash
 # Install ChromaDB if not already installed
+pip install chromadb
 
-pip install chromadb### 2. Installation
+# Start ChromaDB server
+chroma run --host localhost --port 8000
+```
 
-
-
-# Start ChromaDB server```bash
-
-chroma run --host localhost --port 8000# Clone or navigate to the project directory
-
-```cd jira-autoassign
-
-
-
-### 4. Train the Model# Create a virtual environment
-
-python3 -m venv venv
+### 4. Train the Model
 
 Fetch tickets from JIRA and train embeddings for all teams:
 
-# Activate virtual environment
-
-```bashsource venv/bin/activate  # On macOS/Linux
-
-PYTHONPATH=$PWD venv/bin/python3 scripts/fetch_and_train_by_team.py# venv\Scripts\activate   # On Windows
-
+```bash
+PYTHONPATH=$PWD venv/bin/python3 scripts/fetch_and_train_by_team.py
 ```
 
-# Install dependencies
-
-This will:pip install -r requirements.txt
-
-- Fetch tickets from the last 90 days for each team```
-
+This will:
+- Fetch tickets from the last 90 days for each team
 - Generate embeddings using OpenAI
-
-- Store in ChromaDB for similarity search### 3. Configuration
-
+- Store in ChromaDB for similarity search
 - Cache data in `data/team_assigned_tickets_90days.json`
 
-Create a `.env` file from the example:
-
-### 5. Predict Team Assignment
+### 5. Test Predictions (Optional)
 
 ```bash
-
-```bashcp .env.example .env
-
-# Predict team for a specific ticket```
-
+# Predict team for a specific ticket
 PYTHONPATH=$PWD venv/bin/python3 scripts/simple_predict.py NFSAAS-148584
 
-Edit `.env` with your configuration:
-
 # Output example:
+# 🎯 Predicted Team: TEAM-SUPERNOVA
+# 📈 Confidence: 60.0% (12/20 votes)
+```
 
-# 🎯 Predicted Team: TEAM-SUPERNOVA```env
+### 6. Start Webhook Server
 
-# 📈 Confidence: 60.0% (12/20 votes)# Jira Configuration
+```bash
+# Start the Flask webhook server
+PYTHONPATH=$PWD python scripts/webhook_server.py
+```
 
-```JIRA_BASE_URL=https://your-company.atlassian.net
+The server will start on `http://0.0.0.0:5000` (or your configured port).
 
-JIRA_EMAIL=your-email@company.com
+## 📁 Project Structure
 
-## 📁 Project StructureJIRA_API_TOKEN=your_jira_api_token_here
-
-
-
-```# Team Configuration
-
-jira-autoassign/TECHNICAL_OWNER_TEAM=OurTeamName
-
+```
+netapp-jira-autoassign/
 ├── app/
-
-│   ├── enhanced_chroma_client.py  # Main ChromaDB + embeddings client# Assignment Configuration
-
-│   └── jira_client.py            # JIRA API clientASSIGNMENT_THRESHOLD=0.5
-
-├── scripts/SIMILARITY_WEIGHT=0.6
-
-│   ├── fetch_and_train_by_team.py # Training scriptRECENCY_WEIGHT=0.2
-
-│   ├── simple_predict.py         # Prediction scriptWORKLOAD_WEIGHT=0.2
-
+│   ├── enhanced_chroma_client.py  # Main ChromaDB + embeddings client (with webhook & email methods)
+│   └── jira_client.py            # JIRA API client
+├── scripts/
+│   ├── fetch_and_train_by_team.py # Training script
+│   ├── simple_predict.py         # Prediction script
+│   ├── webhook_server.py         # Flask webhook server
 │   ├── check_chromadb_status.py  # Check DB status
 
-│   ├── show_trained_teams.py     # View trained teams# Database
-
-│   └── find_unassigned_tickets.py # Find tickets to assignDATABASE_URL=sqlite:///./jira_assignments.db
-
+│   ├── show_trained_teams.py     # View trained teams
+│   └── find_unassigned_tickets.py # Find tickets to assign
 ├── data/                         # Training data cache
-
-├── requirements.txt              # Python dependencies# Server
-
-└── README.md                     # This fileHOST=0.0.0.0
-
-```PORT=8000
-
+├── requirements.txt              # Python dependencies
+├── .env.example                  # Environment variables template
+└── README.md                     # This file
 ```
 
 ## 🔧 Utility Scripts
 
-### 4. Initialize Developer Profiles
-
 ### Check ChromaDB Status
 
-**🆕 AUTOMATIC METHOD (Recommended):**
-
 ```bash
-
-PYTHONPATH=$PWD venv/bin/python3 scripts/check_chromadb_status.pyNo manual CSV editing needed! Let the system fetch everything from Jira:
+PYTHONPATH=$PWD venv/bin/python3 scripts/check_chromadb_status.py
 
 ```
 

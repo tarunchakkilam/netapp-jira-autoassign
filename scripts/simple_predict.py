@@ -5,28 +5,26 @@ Simple prediction: Embed ticket → Match in ChromaDB → Predict team
 import os
 import sys
 import asyncio
-from jira import JIRA
 from dotenv import load_dotenv
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.enhanced_chroma_client import EnhancedTicketEmbeddingClient
+from app.jira_client import JiraClient
 
 load_dotenv()
 
 
 def fetch_ticket_from_jira(ticket_key):
     """Fetch ticket from JIRA."""
-    jira_url = os.getenv('JIRA_BASE_URL')
-    jira_token = os.getenv('JIRA_API_TOKEN')
-    jira = JIRA(server=jira_url, token_auth=jira_token)
+    jira_client = JiraClient()
+    ticket = jira_client.fetch_ticket(ticket_key)
     
-    issue = jira.issue(ticket_key)
     return {
-        'key': issue.key,
-        'summary': issue.fields.summary or '',
-        'description': issue.fields.description or ''
+        'key': ticket.get('key', ticket_key),
+        'summary': ticket.get('summary', ''),
+        'description': ticket.get('description', '')
     }
 
 
@@ -64,29 +62,46 @@ async def predict_team(ticket_key):
     )
     print(f"✅ Found {len(results['ids'][0])} similar tickets")
     
-    # Step 6: Count votes by team
-    print(f"\n🗳️  Step 6: Counting team votes...")
-    team_votes = {}
-    for metadata in results['metadatas'][0]:
-        team = metadata.get('team', 'unknown')
-        team_votes[team] = team_votes.get(team, 0) + 1
+    # Step 6: Prepare similar tickets context for LLM
+    print(f"\n� Step 6: Preparing context for LLM...")
+    similar_tickets_context = []
+    for i in range(len(results['ids'][0])):
+        similar_tickets_context.append({
+            "ticket_id": results['ids'][0][i],
+            "team": results['metadatas'][0][i].get('team', 'unknown'),
+            "summary": results['metadatas'][0][i].get('summary', 'N/A'),
+            "distance": results['distances'][0][i]
+        })
     
-    # Step 7: Determine predicted team
-    predicted_team = max(team_votes.items(), key=lambda x: x[1])[0]
-    confidence = team_votes[predicted_team] / len(results['ids'][0])
+    # Step 7: Send to LLM for prediction
+    print(f"\n🤖 Step 7: Sending to LLM for team prediction...")
+    predicted_team, confidence, llm_reasoning = await client._predict_team_with_llm(
+        new_ticket={
+            "key": ticket_key,
+            "summary": ticket['summary'],
+            "description": ticket['description']
+        },
+        similar_tickets=similar_tickets_context
+    )
     
-    print(f"✅ Vote counting complete")
+    print(f"✅ LLM analysis complete")
     
     # Display results
     print("\n" + "=" * 80)
-    print("📊 PREDICTION RESULTS")
+    print("📊 PREDICTION RESULTS (LLM-Based)")
     print("=" * 80)
     print(f"\n🎯 Predicted Team: {predicted_team.upper()}")
-    print(f"📈 Confidence: {confidence:.1%} ({team_votes[predicted_team]}/{len(results['ids'][0])} votes)")
+    print(f"📈 Confidence: {confidence:.1%}")
+    print(f"\n💭 LLM Reasoning:")
+    print(f"   {llm_reasoning}")
     
-    print(f"\n🗳️  Vote Distribution:")
+    print(f"\n� Vote Distribution (for reference):")
+    team_votes = {}
+    for ticket in similar_tickets_context:
+        team = ticket['team']
+        team_votes[team] = team_votes.get(team, 0) + 1
     for team, votes in sorted(team_votes.items(), key=lambda x: x[1], reverse=True):
-        pct = votes / len(results['ids'][0]) * 100
+        pct = votes / len(similar_tickets_context) * 100
         bar = '█' * int(pct / 2.5)
         print(f"   {team:25} {votes:2}/20 ({pct:5.1f}%) {bar}")
     

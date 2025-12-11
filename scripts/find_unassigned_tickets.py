@@ -19,33 +19,47 @@ async def find_unassigned_tickets():
     
     jira_client = JiraClient()
     
-    # Search for tickets without Technical Owner
-    jql = '''
+    # Get today's date in JIRA format
+    from datetime import datetime
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    # Search for bugs without Technical Owner created today
+    jql = f'''
         project = NFSAAS 
+        AND issuetype = Bug
         AND "Technical Owner" is EMPTY 
-        AND created >= -30d
+        AND created >= "{today}"
         ORDER BY created DESC
     '''
+    
+    print(f"🔍 Searching for unassigned bugs created today ({today})...")
+    print(f"JQL: {jql}\n")
     
     try:
         result = await jira_client.search_issues(
             jql=jql,
-            max_results=10,
-            fields=['summary', 'created', 'status']
+            max_results=50,
+            fields=['summary', 'created', 'status', 'customfield_16202']
         )
         
         tickets = result.get('issues', [])
         
-        print(f"Found {len(tickets)} tickets without Technical Owner:")
-        print("=" * 60)
+        print(f"✅ Found {len(tickets)} unassigned bugs created today:")
+        print("=" * 100)
         
         for ticket in tickets:
             key = ticket['key']
             summary = ticket['fields']['summary']
-            created = ticket['fields']['created'][:10]  # Date part only
+            created = ticket['fields']['created']  # Full timestamp
             status = ticket['fields']['status']['name']
             
-            print(f"{key} - {summary[:50]}... ({status}, {created})")
+            # Get hyperscaler info (customfield_16202 is an array)
+            hyperscaler = ticket['fields'].get('customfield_16202', [])
+            hyperscaler_value = 'N/A'
+            if hyperscaler and isinstance(hyperscaler, list) and len(hyperscaler) > 0:
+                hyperscaler_value = hyperscaler[0].get('value', 'N/A')
+            
+            print(f"🎫 {key:15} | {hyperscaler_value:8} | {status:12} | {created[:19]} | {summary[:50]}")
         
         return tickets
         
@@ -58,10 +72,31 @@ async def main():
     tickets = await find_unassigned_tickets()
     
     if tickets:
-        print(f"\nYou can test team assignment with any of these tickets:")
-        print("python scripts/test_team_assignment.py TICKET_KEY")
+        print(f"\n{'='*100}")
+        print(f"📊 Summary: {len(tickets)} unassigned bugs found")
+        
+        # Count by hyperscaler
+        azure_count = 0
+        other_count = 0
+        for ticket in tickets:
+            hyperscaler = ticket['fields'].get('customfield_16202', [])
+            if hyperscaler and isinstance(hyperscaler, list) and len(hyperscaler) > 0:
+                if hyperscaler[0].get('value', '').upper() == 'AZURE':
+                    azure_count += 1
+                else:
+                    other_count += 1
+            else:
+                other_count += 1
+        
+        print(f"   Azure: {azure_count} tickets")
+        print(f"   Other: {other_count} tickets")
+        
+        print(f"\n💡 You can test team assignment with:")
+        print(f"   venv/bin/python3.11 scripts/simple_predict.py TICKET_KEY")
+        print(f"\n🤖 Or run the scheduler to auto-assign:")
+        print(f"   venv/bin/python3.11 scripts/auto_assign_scheduler.py")
     else:
-        print("\nNo unassigned tickets found in the last 30 days.")
+        print("\n✅ No unassigned bugs found today - all caught up!")
 
 
 if __name__ == "__main__":
