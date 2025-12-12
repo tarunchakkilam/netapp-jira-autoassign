@@ -1,46 +1,76 @@
 version: '3.8'
 
 services:
-  jira-autoassign:
-    build: .
-    container_name: jira-autoassign
+  chromadb:
+    image: chromadb/chroma:0.4.24
+    container_name: chromadb
     ports:
       - "8000:8000"
-    environment:
-      - JIRA_BASE_URL=${JIRA_BASE_URL}
-      - JIRA_EMAIL=${JIRA_EMAIL}
-      - JIRA_API_TOKEN=${JIRA_API_TOKEN}
-      - TECHNICAL_OWNER_TEAM=${TECHNICAL_OWNER_TEAM}
-      - ASSIGNMENT_THRESHOLD=${ASSIGNMENT_THRESHOLD:-0.5}
-      - SIMILARITY_WEIGHT=${SIMILARITY_WEIGHT:-0.6}
-      - RECENCY_WEIGHT=${RECENCY_WEIGHT:-0.2}
-      - WORKLOAD_WEIGHT=${WORKLOAD_WEIGHT:-0.2}
-      - DATABASE_URL=sqlite:////app/data/jira_assignments.db
     volumes:
-      - ./dev_profiles.csv:/app/dev_profiles.csv
-      - ./data:/app/data
+      - chromadb-data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
 
-  # Optional: Add nginx reverse proxy
-  # nginx:
-  #   image: nginx:alpine
-  #   container_name: jira-autoassign-nginx
-  #   ports:
-  #     - "80:80"
-  #     - "443:443"
-  #   volumes:
-  #     - ./nginx.conf:/etc/nginx/nginx.conf
-  #     - ./ssl:/etc/nginx/ssl
-  #   depends_on:
-  #     - jira-autoassign
-  #   restart: unless-stopped
+  jira-autoassign-scheduler:
+    build: .
+    container_name: jira-autoassign-scheduler
+    environment:
+      # JIRA Configuration
+      - JIRA_BASE_URL=${JIRA_BASE_URL}
+      - JIRA_EMAIL=${JIRA_EMAIL}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN}
+      - JIRA_USE_BEARER_AUTH=${JIRA_USE_BEARER_AUTH:-true}
+      
+      # OpenAI/LLM Configuration
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - NETAPP_LLM_API_KEY=${NETAPP_LLM_API_KEY}
+      - NETAPP_LLM_BASE_URL=${NETAPP_LLM_BASE_URL}
+      - NETAPP_LLM_MODEL=${NETAPP_LLM_MODEL:-gpt-4}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-1000}
+      
+      # ChromaDB Configuration
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      
+      # Timezone Configuration
+      - TZ=Asia/Kolkata
+      
+      # SMTP Configuration
+      - SMTP_SERVER=${SMTP_SERVER}
+      - SMTP_PORT=${SMTP_PORT:-25}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - NOTIFICATION_EMAIL=${NOTIFICATION_EMAIL}
+      
+      # Other Settings
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD:-0.35}
+      - ASSIGNMENT_METHOD=${ASSIGNMENT_METHOD:-hybrid}
+      - ASSIGNMENT_LABEL=${ASSIGNMENT_LABEL:-auto-assigned}
+    
+    volumes:
+      - ./logs:/app/logs
+    
+    depends_on:
+      - chromadb
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "auto_assign_scheduler.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 volumes:
-  data:
+  chromadb-data:
     driver: local

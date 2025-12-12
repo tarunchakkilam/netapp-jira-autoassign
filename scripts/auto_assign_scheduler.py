@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 class JiraAutoAssignScheduler:
     """Scheduler to automatically assign unassigned JIRA tickets."""
     
-    def __init__(self, interval_seconds: int = 60):
+    def __init__(self, interval_seconds: int = 20):
         """
         Initialize the scheduler.
         
@@ -54,6 +54,7 @@ class JiraAutoAssignScheduler:
         self.embedding_client = None
         self.processed_tickets = set()  # Track processed tickets to avoid duplicates
         self.start_time = datetime.now()  # Record when scheduler started
+        self.is_running = False  # Lock to prevent concurrent runs
         
     def _get_embedding_client(self) -> EnhancedTicketEmbeddingClient:
         """Get or create embedding client (lazy initialization)."""
@@ -75,10 +76,12 @@ class JiraAutoAssignScheduler:
         # JQL query for unassigned tickets created after scheduler start
         # Note: We'll filter by Azure and Technical Owner in code after fetching
         # since JQL field names may vary by JIRA instance
+        # IMPORTANT: Exclude Done/Resolved/Closed tickets
         jql = f'''
             project = NFSAAS 
             AND issuetype = Bug 
             AND created >= "{start_timestamp}"
+            AND status NOT IN (Done, Resolved, Closed, Cancelled, Withdrawn)
             ORDER BY created ASC
         '''
         
@@ -201,74 +204,88 @@ class JiraAutoAssignScheduler:
     
     async def run_once(self):
         """Run one iteration of the scheduler."""
-        job_start_time = datetime.now()
-        print(f"\n{'='*80}")
-        print(f"🚀 Auto-Assignment Job Started - {job_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*80}")
+        # Check if a job is already running
+        if self.is_running:
+            print(f"\n⚠️  Skipping job - previous job still running at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.warning(f"Skipped job - previous job still running")
+            return
         
-        logger.info(f"\n{'='*80}")
-        logger.info(f"🚀 Auto-Assignment Job Started - {job_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"   Scheduler started at: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"   Total processed so far: {len(self.processed_tickets)} tickets")
-        logger.info(f"{'='*80}")
+        # Set lock
+        self.is_running = True
         
-        # Fetch unassigned tickets
-        ticket_keys = await self.fetch_unassigned_tickets()
+        try:
+            job_start_time = datetime.now()
+            print(f"\n{'='*80}")
+            print(f"🚀 Auto-Assignment Job Started - {job_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*80}")
         
-        # Filter out already processed tickets
-        new_tickets = [key for key in ticket_keys if key not in self.processed_tickets]
-        
-        # Track results
-        success_count = 0
-        failed_count = 0
-        skipped_count = 0
-        
-        if new_tickets:
-            print(f"📋 Processing {len(new_tickets)} new ticket(s)...")
-            logger.info(f"📋 Processing {len(new_tickets)} new ticket(s): {', '.join(new_tickets)}")
+            logger.info(f"\n{'='*80}")
+            logger.info(f"🚀 Auto-Assignment Job Started - {job_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"   Scheduler started at: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"   Total processed so far: {len(self.processed_tickets)} tickets")
+            logger.info(f"{'='*80}")
             
-            # Process each ticket
-            for ticket_key in new_tickets:
-                result = await self.process_ticket(ticket_key)
-                
-                # Track results
-                status = result.get('status', 'unknown')
-                if status == 'success':
-                    success_count += 1
-                elif status == 'skipped':
-                    skipped_count += 1
-                else:
-                    failed_count += 1
-                
-                # Mark as processed (even if failed, to avoid retrying immediately)
-                self.processed_tickets.add(ticket_key)
-                
-                # Small delay between tickets to avoid rate limiting
-                await asyncio.sleep(2)
+            # Fetch unassigned tickets
+            ticket_keys = await self.fetch_unassigned_tickets()
             
-            # Log summary
-            logger.info(f"\n📊 Job Summary:")
-            logger.info(f"   ✅ Successfully assigned: {success_count}")
-            logger.info(f"   ⏭️  Skipped: {skipped_count}")
-            logger.info(f"   ❌ Failed: {failed_count}")
-            logger.info(f"   📝 Total processed in this run: {len(new_tickets)}")
+            # Filter out already processed tickets
+            new_tickets = [key for key in ticket_keys if key not in self.processed_tickets]
             
-        else:
-            if ticket_keys:
-                print(f"ℹ️  All {len(ticket_keys)} ticket(s) already processed in this session")
-                logger.info(f"ℹ️  All {len(ticket_keys)} ticket(s) already processed in this session")
+            # Track results
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+            
+            if new_tickets:
+                print(f"📋 Processing {len(new_tickets)} new ticket(s)...")
+                logger.info(f"📋 Processing {len(new_tickets)} new ticket(s): {', '.join(new_tickets)}")
+                
+                # Process each ticket
+                for ticket_key in new_tickets:
+                    result = await self.process_ticket(ticket_key)
+                    
+                    # Track results
+                    status = result.get('status', 'unknown')
+                    if status == 'success':
+                        success_count += 1
+                    elif status == 'skipped':
+                        skipped_count += 1
+                    else:
+                        failed_count += 1
+                    
+                    # Mark as processed (even if failed, to avoid retrying immediately)
+                    self.processed_tickets.add(ticket_key)
+                    
+                    # Small delay between tickets to avoid rate limiting
+                    await asyncio.sleep(2)
+                
+                # Log summary
+                logger.info(f"\n📊 Job Summary:")
+                logger.info(f"   ✅ Successfully assigned: {success_count}")
+                logger.info(f"   ⏭️  Skipped: {skipped_count}")
+                logger.info(f"   ❌ Failed: {failed_count}")
+                logger.info(f"   📝 Total processed in this run: {len(new_tickets)}")
+                
+            else:
+                if ticket_keys:
+                    print(f"ℹ️  All {len(ticket_keys)} ticket(s) already processed in this session")
+                    logger.info(f"ℹ️  All {len(ticket_keys)} ticket(s) already processed in this session")
+            
+                job_end_time = datetime.now()
+                duration = (job_end_time - job_start_time).total_seconds()
+                
+                print(f"\n{'='*80}")
+                print(f"✅ Job Completed - {job_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"{'='*80}\n")
+                
+                logger.info(f"\n{'='*80}")
+                logger.info(f"✅ Job Completed - {job_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info(f"   Duration: {duration:.1f} seconds")
+                logger.info(f"{'='*80}\n")
         
-        job_end_time = datetime.now()
-        duration = (job_end_time - job_start_time).total_seconds()
-        
-        print(f"\n{'='*80}")
-        print(f"✅ Job Completed - {job_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*80}\n")
-        
-        logger.info(f"\n{'='*80}")
-        logger.info(f"✅ Job Completed - {job_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"   Duration: {duration:.1f} seconds")
-        logger.info(f"{'='*80}\n")
+        finally:
+            # Always release the lock
+            self.is_running = False
     
     async def run_forever(self):
         """Run the scheduler continuously."""
@@ -313,8 +330,8 @@ class JiraAutoAssignScheduler:
 
 def main():
     """Main entry point."""
-    # Get interval from environment or use default (60 seconds)
-    interval = int(os.getenv('AUTO_ASSIGN_INTERVAL', 60))
+    # Get interval from environment or use default (20 seconds)
+    interval = int(os.getenv('AUTO_ASSIGN_INTERVAL', 20))
     
     # Create and run scheduler
     scheduler = JiraAutoAssignScheduler(interval_seconds=interval)

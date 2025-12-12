@@ -40,15 +40,16 @@ class EnhancedTicketEmbeddingClient:
         "team-elbrus": "Team Elbrus",
     }
     
-    def __init__(self, host: str = "localhost", port: int = 8000):
+    def __init__(self, host: str = None, port: int = None):
         """Initialize the enhanced client."""
-        self.host = host
-        self.port = port
+        # Read from environment variables if not provided
+        self.host = host or os.getenv('CHROMA_HOST', 'localhost')
+        self.port = port or int(os.getenv('CHROMA_PORT', '8000'))
         
         # Initialize ChromaDB client (v1.x API)
         self.chroma_client = chromadb.HttpClient(
-            host=host,
-            port=port
+            host=self.host,
+            port=self.port
         )
         
         # Initialize other clients
