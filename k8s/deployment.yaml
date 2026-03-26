@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jira-autoassign-scheduler
+  namespace: jira-autoassign-user
+  labels:
+    app: jira-autoassign-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jira-autoassign-scheduler
+  template:
+    metadata:
+      labels:
+        app: jira-autoassign-scheduler
+    spec:
+      containers:
+        - name: scheduler
+          image: jira-autoassign-scheduler:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "scripts/auto_assign_scheduler.py"]
+          envFrom:
+            - configMapRef:
+                name: jira-autoassign-config
+            - secretRef:
+                name: jira-autoassign-secrets
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          livenessProbe:
+            exec:
+              command: ["pgrep", "-f", "auto_assign_scheduler.py"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["pgrep", "-f", "auto_assign_scheduler.py"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: logs
+              mountPath: /app/logs
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: logs
+          emptyDir: {}
+        - name: data
+          emptyDir: {}

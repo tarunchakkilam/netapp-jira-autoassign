@@ -10,6 +10,16 @@ An intelligent team assignment system using embeddings and vector similarity to 
   - `app/jira_client.py`
 - Some webhook/API-server references in this README are legacy notes from older iterations and should be treated as non-authoritative unless corresponding files exist in the repo.
 
+## Kubernetes Deployment (k3s)
+
+For multi-user deployment with namespace-scoped secrets, use:
+- `k8s/README.md`
+- `k8s/chromadb-shared.yaml`
+- `k8s/namespace.yaml`
+- `k8s/configmap.yaml`
+- `k8s/secret.example.yaml`
+- `k8s/deployment.yaml`
+
 ## 🎯 Overview
 
 This system uses OpenAI embeddings and ChromaDB to learn from historical JIRA ticket assignments and predict the best team for new tickets. It achieves 60-75% confidence on clear matches by finding similar historical tickets and using majority voting.

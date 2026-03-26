@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jira-autoassign-config
+  namespace: jira-autoassign-user
+data:
+  JIRA_USE_BEARER_AUTH: "true"
+  CHROMA_HOST: "chromadb.platform.svc.cluster.local"
+  CHROMA_PORT: "8000"
+  AUTO_ASSIGN_INTERVAL: "20"
+  JIRA_MAX_RETRIES: "3"
+  JIRA_RETRY_BACKOFF_SECONDS: "1.0"
+  NETAPP_LLM_VERIFY_TLS: "true"
+  TECHNICAL_OWNER_FIELD: "customfield_15906"
+  TECHNICAL_OWNER_FALLBACK_FIELD: "customfield_10050"
+  HYPERSCALER_FIELD: "customfield_16202"
+  JIRA_DEBUG_FULL_TICKET: "false"
+  PROCESSED_TICKETS_STATE_FILE: "/app/data/processed_tickets_state.json"

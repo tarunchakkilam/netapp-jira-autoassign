@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jira-autoassign-user
+  labels:
+    app.kubernetes.io/name: jira-autoassign
+    app.kubernetes.io/part-of: jira-autoassign
