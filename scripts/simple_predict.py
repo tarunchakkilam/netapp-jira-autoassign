@@ -20,11 +20,30 @@ def fetch_ticket_from_jira(ticket_key):
     """Fetch ticket from JIRA."""
     jira_client = JiraClient()
     ticket = jira_client.fetch_ticket(ticket_key)
+    if not ticket:
+        return None
+    
+    # Check hyperscaler field
+    hyperscaler_field = ticket.get('hyperscaler')
+    hyperscaler_value = ''
+    hyperscaler_empty = False
+    
+    if hyperscaler_field:
+        if isinstance(hyperscaler_field, list) and len(hyperscaler_field) > 0:
+            hyperscaler_value = hyperscaler_field[0].get('value', '')
+        elif isinstance(hyperscaler_field, dict):
+            hyperscaler_value = hyperscaler_field.get('value', '')
+        else:
+            hyperscaler_value = str(hyperscaler_field)
+    else:
+        hyperscaler_empty = True
     
     return {
         'key': ticket.get('key', ticket_key),
         'summary': ticket.get('summary', ''),
-        'description': ticket.get('description', '')
+        'description': ticket.get('description', ''),
+        'hyperscaler_value': hyperscaler_value,
+        'hyperscaler_empty': hyperscaler_empty
     }
 
 
@@ -37,7 +56,17 @@ async def predict_team(ticket_key):
     # Step 1: Fetch ticket
     print(f"\n📥 Step 1: Fetching ticket from JIRA...")
     ticket = fetch_ticket_from_jira(ticket_key)
+    if not ticket:
+        print(f"❌ Failed to fetch ticket {ticket_key} from JIRA")
+        return
     print(f"✅ Fetched: {ticket['summary'][:80]}...")
+    
+    # Check hyperscaler field status
+    if ticket['hyperscaler_empty']:
+        print(f"\n⚠️  HYPERSCALER FIELD IS EMPTY!")
+        print(f"   → LLM will analyze ticket content to determine if it's Azure/ANF related")
+    else:
+        print(f"\n✅ Hyperscaler field: {ticket['hyperscaler_value']}")
     
     # Step 2: Create content for embedding
     full_content = f"{ticket['summary']} {ticket['description']}"
@@ -75,21 +104,41 @@ async def predict_team(ticket_key):
     
     # Step 7: Send to LLM for prediction
     print(f"\n🤖 Step 7: Sending to LLM for team prediction...")
+    if ticket['hyperscaler_empty']:
+        print(f"   ⚠️  NEW FEATURE: LLM will also verify if this is an Azure/ANF ticket")
+    
     predicted_team, confidence, llm_reasoning = await client._predict_team_with_llm(
         new_ticket={
             "key": ticket_key,
             "summary": ticket['summary'],
             "description": ticket['description']
         },
-        similar_tickets=similar_tickets_context
+        similar_tickets=similar_tickets_context,
+        hyperscaler_empty=ticket['hyperscaler_empty']
     )
     
     print(f"✅ LLM analysis complete")
+    
+    # Check if LLM determined it's NOT Azure/ANF
+    if predicted_team == "NOT_AZURE_ANF":
+        print("\n" + "=" * 80)
+        print("⏭️  TICKET SKIPPED - NOT AZURE/ANF RELATED")
+        print("=" * 80)
+        print(f"\n💭 LLM Reasoning:")
+        print(f"   {llm_reasoning}")
+        print("\n" + "=" * 80)
+        return
     
     # Display results
     print("\n" + "=" * 80)
     print("📊 PREDICTION RESULTS (LLM-Based)")
     print("=" * 80)
+    
+    # Show Azure/ANF verification if hyperscaler was empty
+    if ticket['hyperscaler_empty']:
+        print(f"\n✅ AZURE/ANF VERIFICATION: PASSED")
+        print(f"   → LLM confirmed this is an Azure NetApp Files ticket")
+    
     print(f"\n🎯 Predicted Team: {predicted_team.upper()}")
     print(f"📈 Confidence: {confidence:.1%}")
     print(f"\n💭 LLM Reasoning:")

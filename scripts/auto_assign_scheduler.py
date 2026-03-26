@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
 Scheduled job to auto-assign unassigned JIRA tickets.
-Runs every 1 minute to fetch and process unassigned tickets created today.
+Runs every 20 seconds (configurable) to fetch and process unassigned tickets.
+
+NEW FEATURE:
+- Now processes tickets even if Hyperscaler field (customfield_16202) is EMPTY
+- LLM will analyze ticket content to determine if it's Azure/ANF related
+- If Azure/ANF: LLM assigns to appropriate team
+- If NOT Azure/ANF: Ticket is skipped with reasoning logged
+- This works because our training DB contains only Azure ANF tickets
 """
 import os
 import sys
 import asyncio
-import time
 import logging
+import json
 from datetime import datetime
 from typing import List, Dict, Any
 from pathlib import Path
@@ -39,6 +46,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def validate_runtime_configuration() -> None:
+    """Fail fast for missing critical runtime configuration."""
+    required_env = ["JIRA_BASE_URL", "JIRA_API_TOKEN", "NETAPP_LLM_API_KEY"]
+    missing = [name for name in required_env if not os.getenv(name)]
+    if missing:
+        raise ValueError(f"Missing required environment variable(s): {', '.join(missing)}")
+
+
 class JiraAutoAssignScheduler:
     """Scheduler to automatically assign unassigned JIRA tickets."""
     
@@ -53,8 +68,48 @@ class JiraAutoAssignScheduler:
         self.jira_client = JiraClient()
         self.embedding_client = None
         self.processed_tickets = set()  # Track processed tickets to avoid duplicates
+        self.processed_tickets_state_file = Path(
+            os.getenv(
+                "PROCESSED_TICKETS_STATE_FILE",
+                str(Path(__file__).parent.parent / "data" / "processed_tickets_state.json"),
+            )
+        )
         self.start_time = datetime.now()  # Record when scheduler started
         self.is_running = False  # Lock to prevent concurrent runs
+        self._load_processed_tickets()
+
+    def _load_processed_tickets(self) -> None:
+        """Load processed ticket cache from disk."""
+        try:
+            if not self.processed_tickets_state_file.exists():
+                return
+            with open(self.processed_tickets_state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            if isinstance(state, list):
+                self.processed_tickets = set(str(item) for item in state)
+            elif isinstance(state, dict):
+                items = state.get("tickets", [])
+                self.processed_tickets = set(str(item) for item in items)
+            logger.info(
+                "Loaded %s processed ticket(s) from %s",
+                len(self.processed_tickets),
+                self.processed_tickets_state_file,
+            )
+        except Exception as e:
+            logger.warning("Failed to load processed ticket cache: %s", e)
+
+    def _save_processed_tickets(self) -> None:
+        """Persist processed ticket cache to disk."""
+        try:
+            self.processed_tickets_state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": datetime.now().isoformat(),
+                "tickets": sorted(self.processed_tickets),
+            }
+            with open(self.processed_tickets_state_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            logger.warning("Failed to save processed ticket cache: %s", e)
         
     def _get_embedding_client(self) -> EnhancedTicketEmbeddingClient:
         """Get or create embedding client (lazy initialization)."""
@@ -91,34 +146,56 @@ class JiraAutoAssignScheduler:
             # Search for tickets
             result = await self.jira_client.search_issues(
                 jql=jql,
-                fields=['key', 'summary', 'created', 'customfield_16202', 'customfield_10050'],
+                fields=[
+                    'key',
+                    'summary',
+                    'created',
+                    self.jira_client.hyperscaler_field,
+                    self.jira_client.technical_owner_field,
+                    self.jira_client.technical_owner_fallback_field,
+                ],
                 max_results=100  # Fetch more since we'll filter in code
             )
             
             tickets = result.get('issues', [])
             
             # Filter tickets in code (Azure + no Technical Owner)
+            # NEW FEATURE: Also include tickets with empty hyperscaler field - LLM will determine if it's Azure/ANF
             filtered_keys = []
+            empty_hyperscaler_keys = []  # Track tickets with empty hyperscaler for logging
+            
             for ticket in tickets:
                 fields = ticket.get('fields', {})
                 
-                # Check Hyperscaler (customfield_16202) = Azure (array format)
-                hyperscaler = fields.get('customfield_16202')
+                # Check Hyperscaler = Azure (array format)
+                hyperscaler = fields.get(self.jira_client.hyperscaler_field)
                 hyperscaler_value = None
                 if hyperscaler and isinstance(hyperscaler, list) and len(hyperscaler) > 0:
                     hyperscaler_value = hyperscaler[0].get('value')
                 
-                # Check Technical Owner (customfield_10050) is empty
-                technical_owner = fields.get('customfield_10050')
+                # Check Technical Owner is empty (support primary + fallback fields)
+                technical_owner = (
+                    fields.get(self.jira_client.technical_owner_field)
+                    or fields.get(self.jira_client.technical_owner_fallback_field)
+                )
                 
-                # Only include if Azure and no Technical Owner
-                if hyperscaler_value and hyperscaler_value.upper() == 'AZURE' and not technical_owner:
-                    filtered_keys.append(ticket['key'])
+                # Include tickets if:
+                # 1. Hyperscaler = Azure AND no Technical Owner (original logic)
+                # 2. Hyperscaler is empty AND no Technical Owner (NEW: LLM will analyze)
+                if not technical_owner:
+                    if hyperscaler_value and hyperscaler_value.upper() == 'AZURE':
+                        filtered_keys.append(ticket['key'])
+                    elif not hyperscaler_value:
+                        # Empty hyperscaler - let LLM determine if it's Azure/ANF
+                        filtered_keys.append(ticket['key'])
+                        empty_hyperscaler_keys.append(ticket['key'])
             
             if filtered_keys:
-                print(f"✅ Found {len(filtered_keys)} unassigned Azure ticket(s): {', '.join(filtered_keys)}")
+                print(f"✅ Found {len(filtered_keys)} unassigned ticket(s): {', '.join(filtered_keys)}")
+                if empty_hyperscaler_keys:
+                    print(f"   📝 Note: {len(empty_hyperscaler_keys)} ticket(s) have empty hyperscaler field - LLM will analyze: {', '.join(empty_hyperscaler_keys)}")
             else:
-                print(f"✅ No unassigned Azure tickets found (checked {len(tickets)} total tickets)")
+                print(f"✅ No unassigned tickets found (checked {len(tickets)} total tickets)")
             
             return filtered_keys
             
@@ -255,6 +332,7 @@ class JiraAutoAssignScheduler:
                     
                     # Mark as processed (even if failed, to avoid retrying immediately)
                     self.processed_tickets.add(ticket_key)
+                    self._save_processed_tickets()
                     
                     # Small delay between tickets to avoid rate limiting
                     await asyncio.sleep(2)
@@ -308,6 +386,7 @@ class JiraAutoAssignScheduler:
                 if current_date != last_clear_date:
                     print(f"📅 New day detected - clearing processed tickets cache")
                     self.processed_tickets.clear()
+                    self._save_processed_tickets()
                     last_clear_date = current_date
                 
                 # Run one iteration
@@ -330,6 +409,7 @@ class JiraAutoAssignScheduler:
 
 def main():
     """Main entry point."""
+    validate_runtime_configuration()
     # Get interval from environment or use default (20 seconds)
     interval = int(os.getenv('AUTO_ASSIGN_INTERVAL', 20))
     

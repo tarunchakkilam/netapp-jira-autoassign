@@ -73,8 +73,8 @@ class EnhancedTicketEmbeddingClient:
         if not api_key:
             raise ValueError("NETAPP_LLM_API_KEY not set in environment")
         
-        import httpx
-        httpx_client = httpx.Client(verify=False, timeout=60.0)
+        verify_tls = os.getenv('NETAPP_LLM_VERIFY_TLS', 'true').lower() == 'true'
+        httpx_client = httpx.Client(verify=verify_tls, timeout=60.0)
         
         return OpenAI(
             base_url=os.getenv('NETAPP_LLM_BASE_URL', 'https://llm-proxy-api.ai.openeng.netapp.com'),
@@ -284,7 +284,7 @@ class EnhancedTicketEmbeddingClient:
                 jql=f'key = {ticket_key}',
                 max_results=1,
                 fields=['summary', 'description', 'components', 'labels', 'issuetype', 
-                       'priority', 'status', 'created', 'updated', 'customfield_15906', 'project']
+                       'priority', 'status', 'created', 'updated', self.jira_client.technical_owner_field, 'project']
             )
             
             if not result.get('issues'):
@@ -294,7 +294,7 @@ class EnhancedTicketEmbeddingClient:
             ticket_data['key'] = ticket_key
             
             # Check if already has Technical Owner
-            current_owner = ticket_data.get('customfield_15906')
+            current_owner = ticket_data.get(self.jira_client.technical_owner_field) or ticket_data.get('technical_owner')
             if current_owner:
                 return {
                     "ticket": ticket_key,
@@ -525,7 +525,8 @@ class EnhancedTicketEmbeddingClient:
     async def _predict_team_with_llm(
         self,
         new_ticket: Dict[str, str],
-        similar_tickets: List[Dict[str, Any]]
+        similar_tickets: List[Dict[str, Any]],
+        hyperscaler_empty: bool = False
     ) -> Tuple[str, float, str]:
         """
         Use LLM to predict the best team based on new ticket and similar historical tickets.
@@ -533,6 +534,7 @@ class EnhancedTicketEmbeddingClient:
         Args:
             new_ticket: Dict with 'key', 'summary', 'description' of new ticket
             similar_tickets: List of similar tickets from ChromaDB with team assignments
+            hyperscaler_empty: If True, LLM will first verify if ticket is Azure/ANF related
             
         Returns:
             Tuple of (predicted_team, confidence, reasoning)
@@ -544,9 +546,26 @@ class EnhancedTicketEmbeddingClient:
             for i, ticket in enumerate(similar_tickets[:10])
         ])
         
-        prompt = f"""You are an expert JIRA ticket triaging system for NetApp. Your task is to assign a new JIRA ticket to the most appropriate team based on similar historical tickets.
+        # Add Azure/ANF verification instructions if hyperscaler field is empty
+        azure_check_instruction = ""
+        if hyperscaler_empty:
+            azure_check_instruction = """
+⚠️ IMPORTANT: The Hyperscaler field is EMPTY for this ticket.
+- First, analyze if this ticket is related to Azure NetApp Files (ANF) / Azure Cloud
+- Our training database contains ONLY Azure ANF tickets, so check for Azure-specific keywords:
+  * Azure, ANF, Azure NetApp Files, Subscription, Resource Group, ARM
+  * Azure Portal, Azure CLI, az commands
+  * Storage Account, Managed Identity, Service Principal
+  * Azure regions (EastUS, WestUS, UKSouth, etc.)
+  * VNet, Subnet, Private Endpoint
+- If ticket is clearly NOT related to Azure/ANF, respond with TEAM: NOT_AZURE_ANF
+- Only proceed with team assignment if you're confident it's Azure/ANF related
 
-NEW TICKET TO ASSIGN:
+"""
+        
+        prompt = f"""You are an expert JIRA ticket triaging system for NetApp Cloud Volumes (Azure NetApp Files). Your task is to assign a new JIRA ticket to the most appropriate team based on similar historical tickets.
+
+{azure_check_instruction}NEW TICKET TO ASSIGN:
 Ticket: {new_ticket['key']}
 Summary: {new_ticket['summary']}
 Description: {new_ticket['description'][:500]}...
@@ -649,10 +668,13 @@ REASONING: The ticket involves FabricPool and cool tier issues, which are handle
             # Check filters: NFSAAS project + Bug type + Azure + No Technical Owner
             project_key = ticket.get('project', {}).get('key', '')
             issue_type = ticket.get('issuetype', {}).get('name', '')
-            technical_owner = ticket.get('customfield_10050')  # Technical Owner field
+            technical_owner = ticket.get('technical_owner')
             
-            # Get Hyperscaler field (customfield_16202) - Azure (array format)
-            hyperscaler_field = ticket.get('customfield_16202')
+            # Get Hyperscaler field (array format from Jira custom field)
+            hyperscaler_field = ticket.get('hyperscaler')
+            hyperscaler_value = ''
+            hyperscaler_empty = False
+            
             if hyperscaler_field:
                 # Field is an array: [{"value": "Azure", "id": "16809"}]
                 if isinstance(hyperscaler_field, list) and len(hyperscaler_field) > 0:
@@ -662,7 +684,7 @@ REASONING: The ticket involves FabricPool and cool tier issues, which are handle
                 else:
                     hyperscaler_value = str(hyperscaler_field)
             else:
-                hyperscaler_value = ''
+                hyperscaler_empty = True  # Empty hyperscaler - LLM will analyze
             
             # Filter 1: NFSAAS project
             if project_key != 'NFSAAS':
@@ -674,10 +696,13 @@ REASONING: The ticket involves FabricPool and cool tier issues, which are handle
                 print(f"⏭️  Skipping: Not Bug type (found: {issue_type})")
                 return {"status": "skipped", "reason": "Not Bug type"}
             
-            # Filter 3: Hyperscaler must be Azure
-            if hyperscaler_value.upper() != 'AZURE':
+            # Filter 3: Hyperscaler must be Azure OR empty (NEW: LLM will verify if empty)
+            if not hyperscaler_empty and hyperscaler_value.upper() != 'AZURE':
                 print(f"⏭️  Skipping: Not Azure hyperscaler (found: {hyperscaler_value})")
                 return {"status": "skipped", "reason": f"Not Azure (found: {hyperscaler_value})"}
+            
+            if hyperscaler_empty:
+                print(f"⚠️  Note: Hyperscaler field is empty - LLM will analyze if this is an Azure/ANF ticket")
             
             # Filter 4: No existing Technical Owner
             if technical_owner:
@@ -714,11 +739,21 @@ REASONING: The ticket involves FabricPool and cool tier issues, which are handle
                     "summary": ticket.get('summary', ''),
                     "description": ticket.get('description', '')
                 },
-                similar_tickets=similar_tickets_context
+                similar_tickets=similar_tickets_context,
+                hyperscaler_empty=hyperscaler_empty
             )
             
             print(f"🎯 LLM Predicted: {predicted_team} ({confidence:.1%} confidence)")
             print(f"💭 LLM Reasoning: {llm_reasoning}")
+            
+            # Check if LLM determined ticket is NOT Azure/ANF related (when hyperscaler was empty)
+            if predicted_team == "NOT_AZURE_ANF":
+                print(f"⏭️  LLM Analysis: Ticket is NOT Azure/ANF related (hyperscaler field was empty)")
+                return {
+                    "status": "skipped",
+                    "reason": "LLM determined ticket is not Azure/ANF related",
+                    "llm_reasoning": llm_reasoning
+                }
             
             # Normalize team name for JIRA (convert team-nandi -> Team Nandi)
             jira_team_name = self._normalize_team_name(predicted_team)

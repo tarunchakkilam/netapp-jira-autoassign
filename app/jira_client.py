@@ -5,6 +5,8 @@ Handles authentication and assignment API calls.
 import os
 import httpx
 import logging
+import time
+import asyncio
 from typing import Optional, Dict, Any, List
 from base64 import b64encode
 
@@ -34,6 +36,12 @@ class JiraClient:
         self.base_url = (base_url or os.getenv("JIRA_BASE_URL", "")).rstrip("/")
         self.email = email or os.getenv("JIRA_EMAIL", "")
         self.api_token = api_token or os.getenv("JIRA_API_TOKEN", "")
+        self.technical_owner_field = os.getenv("TECHNICAL_OWNER_FIELD", "customfield_15906")
+        self.technical_owner_fallback_field = os.getenv("TECHNICAL_OWNER_FALLBACK_FIELD", "customfield_10050")
+        self.hyperscaler_field = os.getenv("HYPERSCALER_FIELD", "customfield_16202")
+        self.debug_full_ticket = os.getenv("JIRA_DEBUG_FULL_TICKET", "false").lower() == "true"
+        self.max_retries = int(os.getenv("JIRA_MAX_RETRIES", "3"))
+        self.retry_backoff_seconds = float(os.getenv("JIRA_RETRY_BACKOFF_SECONDS", "1.0"))
         
         # Check if using Jira Data Center (personal access token) or Cloud (email + API token)
         # Personal Access Tokens use Bearer authentication
@@ -69,6 +77,106 @@ class JiraClient:
                 "Accept": "application/json"
             }
             logger.info("Using Basic authentication (Jira Cloud)")
+
+    def _should_retry_status(self, status_code: int) -> bool:
+        """Retry on throttling and transient server errors."""
+        return status_code in (429, 500, 502, 503, 504)
+
+    async def _async_request_with_retries(
+        self,
+        method: str,
+        url: str,
+        *,
+        timeout: float = 30.0,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Perform async HTTP request with retry/backoff."""
+        last_exception: Optional[Exception] = None
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    response = await client.request(method, url, **kwargs)
+                    if not self._should_retry_status(response.status_code):
+                        return response
+                    if attempt == self.max_retries:
+                        return response
+                    sleep_for = self.retry_backoff_seconds * attempt
+                    logger.warning(
+                        "Retrying %s %s after status %s (attempt %s/%s, sleep %.1fs)",
+                        method,
+                        url,
+                        response.status_code,
+                        attempt,
+                        self.max_retries,
+                        sleep_for,
+                    )
+                    await asyncio.sleep(sleep_for)
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last_exception = exc
+                    if attempt == self.max_retries:
+                        raise
+                    sleep_for = self.retry_backoff_seconds * attempt
+                    logger.warning(
+                        "Retrying %s %s after transport error: %s (attempt %s/%s, sleep %.1fs)",
+                        method,
+                        url,
+                        exc,
+                        attempt,
+                        self.max_retries,
+                        sleep_for,
+                    )
+                    await asyncio.sleep(sleep_for)
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Request failed unexpectedly")
+
+    def _sync_request_with_retries(
+        self,
+        method: str,
+        url: str,
+        *,
+        timeout: float = 30.0,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Perform sync HTTP request with retry/backoff."""
+        last_exception: Optional[Exception] = None
+        with httpx.Client(timeout=timeout) as client:
+            for attempt in range(1, self.max_retries + 1):
+                try:
+                    response = client.request(method, url, **kwargs)
+                    if not self._should_retry_status(response.status_code):
+                        return response
+                    if attempt == self.max_retries:
+                        return response
+                    sleep_for = self.retry_backoff_seconds * attempt
+                    logger.warning(
+                        "Retrying %s %s after status %s (attempt %s/%s, sleep %.1fs)",
+                        method,
+                        url,
+                        response.status_code,
+                        attempt,
+                        self.max_retries,
+                        sleep_for,
+                    )
+                    time.sleep(sleep_for)
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    last_exception = exc
+                    if attempt == self.max_retries:
+                        raise
+                    sleep_for = self.retry_backoff_seconds * attempt
+                    logger.warning(
+                        "Retrying %s %s after transport error: %s (attempt %s/%s, sleep %.1fs)",
+                        method,
+                        url,
+                        exc,
+                        attempt,
+                        self.max_retries,
+                        sleep_for,
+                    )
+                    time.sleep(sleep_for)
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Request failed unexpectedly")
         
     async def assign_ticket(
         self,
@@ -99,35 +207,34 @@ class JiraClient:
         logger.info(f"Assigning {issue_key} to account {account_id}")
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.put(
-                    url,
-                    json=payload,
-                    headers=self.headers
-                )
-                
-                if response.status_code == 204:
-                    logger.info(f"Successfully assigned {issue_key} to {account_id}")
-                    return {
-                        "success": True,
-                        "status_code": 204,
-                        "message": "Ticket assigned successfully"
-                    }
-                elif response.status_code == 404:
-                    logger.error(f"Issue {issue_key} not found")
-                    return {
-                        "success": False,
-                        "status_code": 404,
-                        "message": f"Issue {issue_key} not found"
-                    }
-                else:
-                    error_text = response.text
-                    logger.error(f"Failed to assign {issue_key}: {response.status_code} - {error_text}")
-                    return {
-                        "success": False,
-                        "status_code": response.status_code,
-                        "message": f"Assignment failed: {error_text}"
-                    }
+            response = await self._async_request_with_retries(
+                "PUT",
+                url,
+                json=payload,
+                headers=self.headers,
+            )
+            if response.status_code == 204:
+                logger.info(f"Successfully assigned {issue_key} to {account_id}")
+                return {
+                    "success": True,
+                    "status_code": 204,
+                    "message": "Ticket assigned successfully"
+                }
+            elif response.status_code == 404:
+                logger.error(f"Issue {issue_key} not found")
+                return {
+                    "success": False,
+                    "status_code": 404,
+                    "message": f"Issue {issue_key} not found"
+                }
+            else:
+                error_text = response.text
+                logger.error(f"Failed to assign {issue_key}: {response.status_code} - {error_text}")
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "message": f"Assignment failed: {error_text}"
+                }
                     
         except httpx.TimeoutException:
             logger.error(f"Timeout while assigning {issue_key}")
@@ -155,40 +262,52 @@ class JiraClient:
             Dict with ticket fields or None if error
         """
         # Request specific fields including custom fields
-        fields = "summary,description,project,issuetype,customfield_10050,customfield_16202"
+        fields = ",".join([
+            "summary",
+            "description",
+            "project",
+            "issuetype",
+            self.technical_owner_field,
+            self.technical_owner_fallback_field,
+            self.hyperscaler_field,
+        ])
         url = f"{self.base_url}/rest/api/{self.api_version}/issue/{issue_key}?fields={fields}"
         
         try:
-            import httpx
-            with httpx.Client(timeout=30.0) as client:
-                response = client.get(url, headers=self.headers)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    # DEBUG: Print full JSON response
-                    print(f"\n{'='*80}")
-                    print(f"🔍 FULL JIRA JSON RESPONSE for {issue_key}")
-                    print(f"{'='*80}")
+            response = self._sync_request_with_retries("GET", url, headers=self.headers)
+
+            if response.status_code == 200:
+                data = response.json()
+
+                if self.debug_full_ticket:
+                    logger.info(f"JIRA_DEBUG_FULL_TICKET enabled for {issue_key}")
                     import json
-                    print(json.dumps(data, indent=2, default=str))
-                    print(f"{'='*80}\n")
-                    
-                    fields = data.get('fields', {})
-                    
-                    # Extract relevant fields
-                    return {
-                        'key': issue_key,
-                        'summary': fields.get('summary', ''),
-                        'description': fields.get('description', ''),
-                        'project': fields.get('project', {}),
-                        'issuetype': fields.get('issuetype', {}),
-                        'customfield_10050': fields.get('customfield_10050'),  # Technical Owner
-                        'customfield_16202': fields.get('customfield_16202'),  # Hyperscaler (Azure)
-                    }
-                else:
-                    logger.error(f"Failed to fetch {issue_key}: {response.status_code}")
-                    return None
+                    logger.info(json.dumps(data, indent=2, default=str))
+
+                fields = data.get('fields', {})
+                technical_owner = (
+                    fields.get(self.technical_owner_field)
+                    or fields.get(self.technical_owner_fallback_field)
+                )
+                hyperscaler = fields.get(self.hyperscaler_field)
+
+                # Extract relevant fields
+                return {
+                    'key': issue_key,
+                    'summary': fields.get('summary', ''),
+                    'description': fields.get('description', ''),
+                    'project': fields.get('project', {}),
+                    'issuetype': fields.get('issuetype', {}),
+                    'technical_owner': technical_owner,
+                    'hyperscaler': hyperscaler,
+                    # Backward-compatible keys for current callers
+                    self.technical_owner_field: fields.get(self.technical_owner_field),
+                    self.technical_owner_fallback_field: fields.get(self.technical_owner_fallback_field),
+                    self.hyperscaler_field: hyperscaler,
+                }
+            else:
+                logger.error(f"Failed to fetch {issue_key}: {response.status_code}")
+                return None
         except Exception as e:
             logger.error(f"Error fetching {issue_key}: {str(e)}")
             return None
@@ -206,29 +325,27 @@ class JiraClient:
         Returns:
             Technical Owner value or None if empty/not found
         """
-        # Technical Owner field ID from your environment
-        tech_owner_field = os.getenv("TECHNICAL_OWNER_FIELD", "customfield_15906")
-        
         url = f"{self.base_url}/rest/api/{self.api_version}/issue/{issue_key}"
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                response = await client.get(
-                    url, 
-                    headers=self.headers,
-                    params={"fields": tech_owner_field}
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    tech_owner = data.get("fields", {}).get(tech_owner_field)
-                    return tech_owner if tech_owner else None
-                else:
-                    logger.error(f"Failed to get technical owner for {issue_key}: {response.status_code}")
-                    return None
-            except Exception as e:
-                logger.error(f"Exception getting technical owner: {e}")
+        try:
+            response = await self._async_request_with_retries(
+                "GET",
+                url,
+                headers=self.headers,
+                params={"fields": f"{self.technical_owner_field},{self.technical_owner_fallback_field}"},
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                fields = data.get("fields", {})
+                tech_owner = fields.get(self.technical_owner_field) or fields.get(self.technical_owner_fallback_field)
+                return tech_owner if tech_owner else None
+            else:
+                logger.error(f"Failed to get technical owner for {issue_key}: {response.status_code}")
                 return None
+        except Exception as e:
+            logger.error(f"Exception getting technical owner: {e}")
+            return None
 
     async def update_technical_owner(self, issue_key: str, team_name: str) -> Dict[str, Any]:
         """
@@ -252,44 +369,44 @@ class JiraClient:
                 "skip_reason": "already_assigned"
             }
         
-        url = f"{self.base_url}/rest/api/2/issue/{issue_key}"
+        url = f"{self.base_url}/rest/api/{self.api_version}/issue/{issue_key}"
         
         payload = {
             "fields": {
-                "customfield_15906": {"value": team_name}  # Technical Owner field with value object
+                self.technical_owner_field: {"value": team_name}
             }
         }
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.put(
-                    url,
-                    json=payload,
-                    headers=self.headers
-                )
-                
-                if response.status_code == 204:
-                    logger.info(f"Successfully updated Technical Owner for {issue_key} to {team_name}")
-                    return {
-                        "success": True,
-                        "status_code": 204,
-                        "message": f"Technical Owner updated to {team_name}"
-                    }
-                elif response.status_code == 404:
-                    logger.error(f"Issue {issue_key} not found")
-                    return {
-                        "success": False,
-                        "status_code": 404,
-                        "message": f"Issue {issue_key} not found"
-                    }
-                else:
-                    error_text = response.text
-                    logger.error(f"Failed to update Technical Owner for {issue_key}: {response.status_code} - {error_text}")
-                    return {
-                        "success": False,
-                        "status_code": response.status_code,
-                        "message": f"Update failed: {error_text}"
-                    }
+            response = await self._async_request_with_retries(
+                "PUT",
+                url,
+                json=payload,
+                headers=self.headers,
+            )
+
+            if response.status_code == 204:
+                logger.info(f"Successfully updated Technical Owner for {issue_key} to {team_name}")
+                return {
+                    "success": True,
+                    "status_code": 204,
+                    "message": f"Technical Owner updated to {team_name}"
+                }
+            elif response.status_code == 404:
+                logger.error(f"Issue {issue_key} not found")
+                return {
+                    "success": False,
+                    "status_code": 404,
+                    "message": f"Issue {issue_key} not found"
+                }
+            else:
+                error_text = response.text
+                logger.error(f"Failed to update Technical Owner for {issue_key}: {response.status_code} - {error_text}")
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "message": f"Update failed: {error_text}"
+                }
                     
         except httpx.TimeoutException:
             logger.error(f"Timeout while updating Technical Owner for {issue_key}")
@@ -332,28 +449,28 @@ class JiraClient:
         logger.info(f"Adding label '{label}' to {issue_key}")
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.put(
-                    url,
-                    json=payload,
-                    headers=self.headers
-                )
-                
-                if response.status_code == 204:
-                    logger.info(f"Successfully added label '{label}' to {issue_key}")
-                    return {
-                        "success": True,
-                        "status_code": 204,
-                        "message": f"Label '{label}' added successfully"
-                    }
-                else:
-                    error_text = response.text
-                    logger.error(f"Failed to add label to {issue_key}: {response.status_code} - {error_text}")
-                    return {
-                        "success": False,
-                        "status_code": response.status_code,
-                        "message": f"Failed to add label: {error_text}"
-                    }
+            response = await self._async_request_with_retries(
+                "PUT",
+                url,
+                json=payload,
+                headers=self.headers,
+            )
+
+            if response.status_code == 204:
+                logger.info(f"Successfully added label '{label}' to {issue_key}")
+                return {
+                    "success": True,
+                    "status_code": 204,
+                    "message": f"Label '{label}' added successfully"
+                }
+            else:
+                error_text = response.text
+                logger.error(f"Failed to add label to {issue_key}: {response.status_code} - {error_text}")
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "message": f"Failed to add label: {error_text}"
+                }
                     
         except Exception as e:
             logger.error(f"Error adding label to {issue_key}: {str(e)}")
@@ -376,15 +493,16 @@ class JiraClient:
         url = f"{self.base_url}/rest/api/{self.api_version}/issue/{issue_key}"
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, headers=self.headers)
-                
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    logger.error(f"Failed to get issue {issue_key}: {response.status_code}")
-                    return None
-                    
+            response = await self._async_request_with_retries(
+                "GET",
+                url,
+                headers=self.headers,
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"Failed to get issue {issue_key}: {response.status_code}")
+                return None
         except Exception as e:
             logger.error(f"Error fetching issue {issue_key}: {str(e)}")
             return None
@@ -428,31 +546,31 @@ class JiraClient:
         logger.info(f"Searching issues with JQL: {jql[:100]}...")
         
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    url,
-                    json=payload,
-                    headers=self.headers
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    issues = data.get('issues', [])
-                    total = data.get('total', 0)
-                    
-                    logger.info(f"Found {len(issues)} issues (total matching: {total})")
-                    # Return full response with issues and total
-                    return {
-                        'issues': issues,
-                        'total': total,
-                        'maxResults': data.get('maxResults', max_results),
-                        'startAt': data.get('startAt', 0)
-                    }
-                else:
-                    error_text = response.text
-                    logger.error(f"Failed to search issues: {response.status_code} - {error_text}")
-                    return {'issues': [], 'total': 0}
-                    
+            response = await self._async_request_with_retries(
+                "POST",
+                url,
+                timeout=60.0,
+                json=payload,
+                headers=self.headers,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                issues = data.get('issues', [])
+                total = data.get('total', 0)
+
+                logger.info(f"Found {len(issues)} issues (total matching: {total})")
+                # Return full response with issues and total
+                return {
+                    'issues': issues,
+                    'total': total,
+                    'maxResults': data.get('maxResults', max_results),
+                    'startAt': data.get('startAt', 0)
+                }
+            else:
+                error_text = response.text
+                logger.error(f"Failed to search issues: {response.status_code} - {error_text}")
+                return {'issues': [], 'total': 0}
+
         except httpx.TimeoutException:
             logger.error("Timeout while searching issues")
             return {'issues': [], 'total': 0}
@@ -479,19 +597,18 @@ class JiraClient:
             params = {"accountId": account_id}
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    url,
-                    params=params,
-                    headers=self.headers
-                )
-                
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    logger.error(f"Failed to get user {account_id}: {response.status_code}")
-                    return None
-                    
+            response = await self._async_request_with_retries(
+                "GET",
+                url,
+                params=params,
+                headers=self.headers,
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"Failed to get user {account_id}: {response.status_code}")
+                return None
+
         except Exception as e:
             logger.error(f"Error fetching user {account_id}: {str(e)}")
             return None

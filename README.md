@@ -2,6 +2,14 @@
 
 An intelligent team assignment system using embeddings and vector similarity to automatically route JIRA tickets to the appropriate team based on historical patterns.
 
+## Current Runtime Mode
+
+- The active production path in this repository is the **scheduler flow**:
+  - `scripts/auto_assign_scheduler.py`
+  - `app/enhanced_chroma_client.py`
+  - `app/jira_client.py`
+- Some webhook/API-server references in this README are legacy notes from older iterations and should be treated as non-authoritative unless corresponding files exist in the repo.
+
 ## 🎯 Overview
 
 This system uses OpenAI embeddings and ChromaDB to learn from historical JIRA ticket assignments and predict the best team for new tickets. It achieves 60-75% confidence on clear matches by finding similar historical tickets and using majority voting.
@@ -121,6 +129,20 @@ PYTHONPATH=$PWD python scripts/webhook_server.py
 
 The server will start on `http://0.0.0.0:5000` (or your configured port).
 
+### 7. Run Scheduler (current runtime)
+
+```bash
+PYTHONPATH=$PWD venv/bin/python3 scripts/auto_assign_scheduler.py
+```
+
+### 8. Run Health Check
+
+```bash
+PYTHONPATH=$PWD venv/bin/python3 scripts/health_check.py
+```
+
+Health check validates required env vars, Jira connectivity, Chroma reachability, and LLM embedding probe.
+
 ## 📁 Project Structure
 
 ```
@@ -193,29 +215,20 @@ Lists recent JIRA tickets without a Technical Owner.
 
 Alice Johnson,5f8a9b1c2d3e4f5g6h7i8j9k,10,3,"Backend API development REST services..."
 
-1. **Training Phase**:Bob Smith,6g9h0i1j2k3l4m5n6o7p8q9r,8,5,"Frontend development React TypeScript..."
-
-   - Fetch historical tickets from JIRA (last 90 days)```
-
+1. **Training Phase**:
+   - Fetch historical tickets from JIRA (last 90 days)
    - Extract summary + description for each ticket
-
-   - Generate 1536-dimensional embeddings using OpenAIFind account IDs: Go to Jira user profile → URL shows `{accountId}`
-
+   - Generate 1536-dimensional embeddings using OpenAI
    - Store embeddings in ChromaDB with team labels
 
-### 5. Run the Service
-
 2. **Prediction Phase**:
-
-   - Fetch new ticket from JIRA```bash
-
-   - Generate embedding for ticket content# Run with uvicorn
-
-   - Query ChromaDB for 20 most similar ticketsuvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-   - Count team votes from similar tickets
-
-   - Return team with most votes + confidence score# Or run directly
+   - Fetch new ticket from JIRA
+   - Generate embedding for ticket content
+   - Query ChromaDB for 20 most similar tickets
+   - Extract top 10 similar tickets with metadata (ticket_id, team, summary, distance)
+   - **Send top 10 to LLM (GPT-4) for intelligent team prediction**
+   - LLM analyzes ticket summaries, historical patterns, and technical keywords
+   - LLM returns predicted team + confidence score + detailed reasoning
 
 python -m app.main
 
